@@ -98,6 +98,10 @@ export class AgentPipeline extends EventEmitter {
     try {
       logger.info(`[AgentPipeline] Starting pipeline for room ${this.roomName}...`);
       await this.livekitTransport.connect(this.roomName);
+      if (this.isShuttingDown) {
+        logger.info('[AgentPipeline] Start aborted (shutdown triggered during LiveKit connect)');
+        return;
+      }
 
       logger.info('[AgentPipeline] Connecting STT...');
       this.stt.connect();

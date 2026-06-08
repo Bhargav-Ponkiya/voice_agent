@@ -61,6 +61,12 @@ export class LiveKitTransport {
         if (timer) clearTimeout(timer);
       }
 
+      // Check if we were cleaned up / disconnected during the connect promise race
+      if (!this.room) {
+        logger.info('[LiveKitTransport] Connect completed but room was already cleaned up');
+        return;
+      }
+
       this.isConnected = true;
       logger.info(`[LiveKitTransport] Connected to room ${roomName}`);
 
