@@ -22,6 +22,7 @@ import { logger } from './utils/logger';
 fs.mkdirSync(config.uploads.dir, { recursive: true });
 
 const app = express();
+app.set('trust proxy', 1); // Trust Render's reverse proxy for rate limiting IP detection
 const httpServer = createServer(app);
 
 // CORS origin function: accept any origin listed in CLIENT_URL (comma-separated).
