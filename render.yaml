@@ -8,7 +8,7 @@ services:
     name: novatel-voice-agent-backend
     env: node
     region: oregon          # change to your nearest region
-    plan: starter           # free tier is fine for the demo; starter has persistent disk
+    plan: free              # free tier doesn't require a credit card
 
     # Build the server workspace only — Vercel handles the frontend separately.
     buildCommand: npm install && npm --workspace server run build
