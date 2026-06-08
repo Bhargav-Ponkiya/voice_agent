@@ -79,6 +79,15 @@ export class AgentPipeline extends EventEmitter {
   private callId: string;
   private roomName: string;
   private livekitTransport: import('../livekit/LiveKitTransport').LiveKitTransport;
+  private clientReadyResolver: (() => void) | null = null;
+
+  private handleClientReady = () => {
+    logger.info(`[AgentPipeline] client:ready received for call ${this.callId}`);
+    if (this.clientReadyResolver) {
+      this.clientReadyResolver();
+      this.clientReadyResolver = null;
+    }
+  };
 
   constructor(socket: Socket, callId: string, systemPrompt: string, roomName: string) {
     super();
@@ -92,6 +101,8 @@ export class AgentPipeline extends EventEmitter {
     // Dynamic import to avoid circular dependencies if any
     const { LiveKitTransport } = require('../livekit/LiveKitTransport');
     this.livekitTransport = new LiveKitTransport(this);
+
+    this.socket.on('client:ready', this.handleClientReady);
   }
 
   async start(): Promise<void> {
@@ -226,10 +237,27 @@ export class AgentPipeline extends EventEmitter {
 
       this.startDeadAirDetection();
 
-      // Wait 1000ms before greeting to allow WebRTC negotiation and ICE connection to settle on the client.
-      // This prevents the initial greeting audio from being clipped or sounding choppy on start.
-      logger.info('[AgentPipeline] Waiting 1000ms for WebRTC connection to stabilize...');
-      await new Promise<void>((resolve) => setTimeout(resolve, 1000));
+      // Wait for client:ready (sent by client when LiveKit Room onConnected triggers)
+      // or fall back to a 4s safety timeout if the event is missed.
+      logger.info('[AgentPipeline] Waiting for client WebRTC connection to stabilize...');
+      const clientReadyPromise = new Promise<void>((resolve) => {
+        this.clientReadyResolver = resolve;
+      });
+      const fallbackTimeout = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          if (this.clientReadyResolver) {
+            logger.warn('[AgentPipeline] client:ready timed out (4s fallback) — greeting starting');
+            this.clientReadyResolver();
+            this.clientReadyResolver = null;
+          }
+          resolve();
+        }, 4000);
+      });
+      await Promise.race([clientReadyPromise, fallbackTimeout]);
+      if (this.isShuttingDown) return;
+
+      // Additional 500ms delay to ensure browser audio context & track subscription are fully active
+      await new Promise<void>((resolve) => setTimeout(resolve, 500));
       if (this.isShuttingDown) return;
 
       // Send the initial agent greeting
@@ -391,6 +419,7 @@ export class AgentPipeline extends EventEmitter {
         this.socket.emit('call:error', { message: clientMessage });
       });
 
+      let startPlaybackTimeout: any;
       const playbackPromise = new Promise<void>((resolve) => {
         let finished = false;
 
@@ -423,11 +452,14 @@ export class AgentPipeline extends EventEmitter {
           }
         }
 
-        // Safety timeout to prevent hanging if Deepgram doesn't respond or flush (15 seconds)
-        playbackTimeoutId = setTimeout(() => {
-          logger.warn(`[AgentPipeline] Safety timeout (15s) triggered waiting for Deepgram flush. speakId: ${speakId}`);
-          cleanup();
-        }, 15000);
+        // Expose a function to start the safety timeout when playback actually starts or is flushed
+        startPlaybackTimeout = () => {
+          if (finished) return;
+          playbackTimeoutId = setTimeout(() => {
+            logger.warn(`[AgentPipeline] Safety timeout (15s) triggered waiting for Deepgram flush. speakId: ${speakId}`);
+            cleanup();
+          }, 15000);
+        };
       });
 
       logger.info('[AgentPipeline] Requesting Gemini stream...');
@@ -483,6 +515,9 @@ export class AgentPipeline extends EventEmitter {
 
       if (!abortSignal.aborted && ttsInstance.connected) {
         ttsInstance.flush();
+        if (startPlaybackTimeout) {
+          startPlaybackTimeout();
+        }
         logger.info('[AgentPipeline] Waiting for Deepgram audio stream to finish...');
         await playbackPromise;
         logger.info('[AgentPipeline] Deepgram audio stream finished or timed out');
@@ -647,6 +682,7 @@ export class AgentPipeline extends EventEmitter {
     }
     this.utteranceBuffer = '';
 
+    this.socket.off('client:ready', this.handleClientReady);
     this.interruptTTS();
     if (this.tts) {
       this.tts.close();

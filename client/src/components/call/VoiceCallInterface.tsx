@@ -156,6 +156,7 @@ export default function VoiceCallInterface({ onCallComplete }: Props) {
         setStatus('agent_thinking');
         setAgentStatus('thinking');
         // Clear any stale streaming text when a new thinking phase begins
+        streamingBufferRef.current = '';
         setStreamingAgentText('');
         streamingSpeakIdRef.current = null;
       });
@@ -179,7 +180,9 @@ export default function VoiceCallInterface({ onCallComplete }: Props) {
           streamingFlushScheduledRef.current = true;
           requestAnimationFrame(() => {
             streamingFlushScheduledRef.current = false;
-            setStreamingAgentText(streamingBufferRef.current);
+            if (streamingSpeakIdRef.current === speakId) {
+              setStreamingAgentText(streamingBufferRef.current);
+            }
           });
         }
       });
@@ -209,6 +212,7 @@ export default function VoiceCallInterface({ onCallComplete }: Props) {
       socket.on('agent:response', ({ text, timestamp }: { text: string; timestamp: string }) => {
         console.log(`[VoiceCall] agent:response: "${text}" at ${timestamp}`);
         // Finalize: commit the full response as a confirmed turn and clear streaming
+        streamingBufferRef.current = '';
         setStreamingAgentText('');
         streamingSpeakIdRef.current = null;
         addTurn('Agent', text, timestamp);
@@ -218,6 +222,7 @@ export default function VoiceCallInterface({ onCallComplete }: Props) {
 
       socket.on('tts:interrupted', () => {
         // Clear streaming text immediately on interrupt so the partial transcript disappears
+        streamingBufferRef.current = '';
         setStreamingAgentText('');
         streamingSpeakIdRef.current = null;
         setStatus((prev) => (prev === 'ending' || prev === 'analyzing' || prev === 'complete' ? prev : 'active'));
@@ -522,6 +527,10 @@ export default function VoiceCallInterface({ onCallComplete }: Props) {
           audio={true}
           video={false}
           onDisconnected={handleEndCall}
+          onConnected={() => {
+            console.log('[VoiceCall] LiveKitRoom connected — emitting client:ready');
+            socketRef.current?.emit('client:ready');
+          }}
         >
           <RoomAudioRenderer />
           {innerContent}
