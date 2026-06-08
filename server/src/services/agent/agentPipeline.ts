@@ -471,65 +471,85 @@ export class AgentPipeline extends EventEmitter {
         };
       });
 
-      logger.info('[AgentPipeline] Requesting Gemini stream...');
-      const stream = streamResponse(this.systemPrompt, this.conversationHistory, abortSignal);
-
-      let firstTokenLogged = false;
-      for await (const chunk of stream) {
-        if (abortSignal.aborted) break;
-        // If the TTS WS dropped mid-stream, stop pulling Gemini tokens — they would just
-        // be discarded silently. Abort the turn so the client gets a clean error rather
-        // than seeing a transcript without audio.
-        if (!ttsInstance.connected) {
-          logger.warn(`[AgentPipeline] TTS WS disconnected mid-stream — aborting turn. speakId: ${speakId}`);
-          this.currentAbortController?.abort();
-          this.socket.emit('call:error', { message: 'Voice generator dropped — please try again' });
-          break;
-        }
-        // Latency milestone #1: time-to-first-token from the LLM. Dominant cost of the budget.
-        if (!firstTokenLogged && this.turnStartedAtMs !== null && !isGreeting) {
-          const elapsedMs = Math.round(performance.now() - this.turnStartedAtMs);
-          logger.info(`[Latency] first_token = ${elapsedMs}ms (Gemini TTFT)`);
-          firstTokenLogged = true;
-        }
-        fullResponse += chunk;
-        sentenceBuffer += chunk;
-
-        // Stream each Gemini text chunk to the client immediately so the transcript
-        // panel shows the agent's words in real-time as they are generated.
-        this.socket.emit('transcript:agent_stream', { chunk, speakId });
-
-        const { sentences, remaining } = this.extractSentences(sentenceBuffer);
-        sentenceBuffer = remaining;
-
-        for (const sentence of sentences) {
-          if (abortSignal.aborted) break;
-          const cleaned = sentence.trim();
-          if (cleaned) {
-            ttsInstance.sendText(cleaned + ' ');
+      if (isGreeting) {
+        // Bypass Gemini LLM for the initial greeting to achieve sub-second greeting latency
+        fullResponse = "Hello, thank you for calling NovaTel. My name is Sarah, and I'm happy to help you today. How can I assist you?";
+        logger.info(`[AgentPipeline] Greeting bypassed Gemini. Sending directly to Deepgram TTS: "${fullResponse}"`);
+        
+        if (!abortSignal.aborted) {
+          this.socket.emit('transcript:agent_stream', { chunk: fullResponse, speakId });
+          if (ttsInstance.connected) {
+            ttsInstance.sendText(fullResponse + ' ');
+            ttsInstance.flush();
+            if (startPlaybackTimeout) {
+              startPlaybackTimeout();
+            }
+            logger.info('[AgentPipeline] Waiting for greeting Deepgram audio stream to finish...');
+            await playbackPromise;
+            logger.info('[AgentPipeline] Greeting Deepgram audio stream finished');
           }
         }
-      }
+      } else {
+        logger.info('[AgentPipeline] Requesting Gemini stream...');
+        const stream = streamResponse(this.systemPrompt, this.conversationHistory, abortSignal);
 
-      // Only flush a trailing partial if it looks like real content (has letters and >=2 chars).
-      // Otherwise it's noise from a cut-off stream that would arrive as half a word.
-      if (!abortSignal.aborted && ttsInstance.connected) {
-        const remaining = sentenceBuffer.trim();
-        if (remaining.length >= 2 && /[A-Za-z]/.test(remaining)) {
-          ttsInstance.sendText(remaining + ' ');
-        } else if (remaining) {
-          logger.warn(`[AgentPipeline] Skipping trailing partial sentence: "${remaining}"`);
-        }
-      }
+        let firstTokenLogged = false;
+        for await (const chunk of stream) {
+          if (abortSignal.aborted) break;
+          // If the TTS WS dropped mid-stream, stop pulling Gemini tokens — they would just
+          // be discarded silently. Abort the turn so the client gets a clean error rather
+          // than seeing a transcript without audio.
+          if (!ttsInstance.connected) {
+            logger.warn(`[AgentPipeline] TTS WS disconnected mid-stream — aborting turn. speakId: ${speakId}`);
+            this.currentAbortController?.abort();
+            this.socket.emit('call:error', { message: 'Voice generator dropped — please try again' });
+            break;
+          }
+          // Latency milestone #1: time-to-first-token from the LLM. Dominant cost of the budget.
+          if (!firstTokenLogged && this.turnStartedAtMs !== null && !isGreeting) {
+            const elapsedMs = Math.round(performance.now() - this.turnStartedAtMs);
+            logger.info(`[Latency] first_token = ${elapsedMs}ms (Gemini TTFT)`);
+            firstTokenLogged = true;
+          }
+          fullResponse += chunk;
+          sentenceBuffer += chunk;
 
-      if (!abortSignal.aborted && ttsInstance.connected) {
-        ttsInstance.flush();
-        if (startPlaybackTimeout) {
-          startPlaybackTimeout();
+          // Stream each Gemini text chunk to the client immediately so the transcript
+          // panel shows the agent's words in real-time as they are generated.
+          this.socket.emit('transcript:agent_stream', { chunk, speakId });
+
+          const { sentences, remaining } = this.extractSentences(sentenceBuffer);
+          sentenceBuffer = remaining;
+
+          for (const sentence of sentences) {
+            if (abortSignal.aborted) break;
+            const cleaned = sentence.trim();
+            if (cleaned) {
+              ttsInstance.sendText(cleaned + ' ');
+            }
+          }
         }
-        logger.info('[AgentPipeline] Waiting for Deepgram audio stream to finish...');
-        await playbackPromise;
-        logger.info('[AgentPipeline] Deepgram audio stream finished or timed out');
+
+        // Only flush a trailing partial if it looks like real content (has letters and >=2 chars).
+        // Otherwise it's noise from a cut-off stream that would arrive as half a word.
+        if (!abortSignal.aborted && ttsInstance.connected) {
+          const remaining = sentenceBuffer.trim();
+          if (remaining.length >= 2 && /[A-Za-z]/.test(remaining)) {
+            ttsInstance.sendText(remaining + ' ');
+          } else if (remaining) {
+            logger.warn(`[AgentPipeline] Skipping trailing partial sentence: "${remaining}"`);
+          }
+        }
+
+        if (!abortSignal.aborted && ttsInstance.connected) {
+          ttsInstance.flush();
+          if (startPlaybackTimeout) {
+            startPlaybackTimeout();
+          }
+          logger.info('[AgentPipeline] Waiting for Deepgram audio stream to finish...');
+          await playbackPromise;
+          logger.info('[AgentPipeline] Deepgram audio stream finished or timed out');
+        }
       }
     } catch (err: unknown) {
       if (err instanceof Error && err.name !== 'AbortError') {
