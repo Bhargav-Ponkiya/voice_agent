@@ -2,6 +2,10 @@
 
 A complete, working voice call agent loop featuring real-time WebRTC audio, advanced STT/TTS streaming, AI QA analysis, and a fully autonomous **self-healing prompt loop**.
 
+## 🌐 Deployed Live Demos
+* **Frontend Application (Vercel):** [https://voice-agent-bhargavp.vercel.app](https://voice-agent-bhargavp.vercel.app)
+* **Backend API Service (Render):** [https://novatel-voice-agent-backend.onrender.com](https://novatel-voice-agent-backend.onrender.com)
+
 ## 📚 Documentation Map
 | File | What's in it |
 |---|---|
