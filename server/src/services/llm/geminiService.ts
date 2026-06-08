@@ -54,11 +54,16 @@ export async function* streamResponse(
   };
 
   const controller = new AbortController();
+  const onExternalAbort = () => {
+    logger.info('[GeminiService] Client abort event received');
+    controller.abort();
+  };
   if (abortSignal) {
-    abortSignal.addEventListener('abort', () => {
-      logger.info('[GeminiService] Client abort event received');
+    if (abortSignal.aborted) {
       controller.abort();
-    });
+    } else {
+      abortSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
   }
 
   // 15-second connection timeout to prevent hanging models
@@ -122,7 +127,7 @@ export async function* streamResponse(
         resetStreamTimeout();
 
         const decodedChunk = decoder.decode(chunk, { stream: true });
-        logger.info(`[GeminiService] Received chunk of size ${chunk.length} bytes. Content: "${decodedChunk.substring(0, 80).replace(/\r?\n/g, '\\n')}"`);
+        logger.debug(`[GeminiService] chunk ${chunk.length}B: "${decodedChunk.substring(0, 60).replace(/\r?\n/g, '\\n')}"`);
         
         buffer += decodedChunk;
         const lines = buffer.split('\n');
@@ -162,6 +167,11 @@ export async function* streamResponse(
     }
     logger.error(`[GeminiService] Model ${model} failed or timed out:`, err);
     throw err;
+  } finally {
+    clearTimeout(timeoutId);
+    if (abortSignal) {
+      abortSignal.removeEventListener('abort', onExternalAbort);
+    }
   }
 }
 

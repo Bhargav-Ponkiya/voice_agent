@@ -9,16 +9,17 @@ This document explains how every piece of the system fits together. Read this be
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                          BROWSER (React)                            │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────┐  │
-│  │ Microphone   │──▶│ AudioContext │──▶│ Socket.IO Client     │  │
-│  │ (16kHz mono) │   │ ScriptProc   │   │ → audio:chunk        │  │
-│  └──────────────┘   └──────────────┘   └──────────┬───────────┘  │
-│  ┌──────────────┐   ┌──────────────┐              │              │
-│  │ Speaker      │◀──│ AudioContext │◀─────────────┘              │
-│  │ (24kHz PCM)  │   │ Buffer Queue │   ← tts:audio (Socket.IO)   │
-│  └──────────────┘   └──────────────┘                             │
+│  ┌──────────────┐   ┌──────────────────────────────────────────┐  │
+│  │ Microphone   │──▶│ LiveKitRoom (publishes 16kHz mono track) │  │
+│  └──────────────┘   └──────────────────────┬───────────────────┘  │
+│  ┌──────────────┐   ┌──────────────────────┴──────────────────┐  │
+│  │ Speaker      │◀──│ RoomAudioRenderer (subscribes to agent) │  │
+│  └──────────────┘   └─────────────────────────────────────────┘  │
+│                                                                   │
+│  Socket.IO is used ONLY for control events (transcripts, state,  │
+│  scorecard) — never for raw audio.                                │
 └─────────────────────────────────────────────────────────────────────┘
-                              ↕ Socket.IO (WebSocket)
+                              ↕ LiveKit WebRTC (audio) + Socket.IO (control)
 ┌─────────────────────────────────────────────────────────────────────┐
 │                       SERVER (Node.js + Express)                    │
 │                                                                     │
@@ -66,43 +67,37 @@ Assessment requires <1.5s perceived latency. Here's how we hit it:
 | Gemini first token | +350ms | Gemini starts streaming response |
 | First complete sentence | +200ms | ~3-5 tokens into first sentence |
 | Deepgram first audio | +150ms | First audio chunk back over WS |
-| Network → browser | +50ms | Socket.IO delivers chunk |
-| Web Audio API plays | +50ms | Decode + buffer |
+| LiveKit WebRTC → browser | +50ms | Subscribed AudioTrack chunk |
+| Browser plays chunk | ~0ms | `<RoomAudioRenderer />` |
 | **Total perceived latency** | **~1300ms** | User hears agent start speaking |
 
-**Critical optimization:** We don't wait for Gemini to finish. The moment a complete sentence appears in the stream buffer, we send it to Deepgram TTS. The agent starts speaking the first sentence while Gemini is still writing the second.
+**Critical optimization:** We don't wait for Gemini to finish. The moment a complete sentence (or `:`/`;`/`\n`) appears in the stream buffer, we send it to Deepgram TTS. The agent starts speaking the first sentence while Gemini is still writing the second.
 
-### Interruption Flow
-1. Deepgram emits `SpeechStarted` event
-2. If `isSpeaking === true`, pipeline calls `interruptTTS()`
-3. `interruptTTS()` calls `AbortController.abort()` → Gemini stream stops
-4. Closes Deepgram TTS WebSocket → no more audio chunks
-5. Frontend `tts:interrupted` event → clears audio queue
-6. New customer turn processed normally
+### Interruption Flow (anti-self-interruption)
+Browser echo cancellation isn't perfect; Sarah's own voice occasionally bleeds into the mic and gets transcribed. Naïve barge-in (fire on any interim) caused Sarah to cut herself off mid-sentence. The hardened flow:
+
+1. Deepgram STT emits interim transcripts; server counts them per response.
+2. Barge-in fires only when **(a) interim text ≥ 3 chars AND (b) at least 2 interims received this response** — single transient blips from echo are filtered.
+3. `interruptTTS()` calls `AbortController.abort()` → Gemini stream stops.
+4. Sends `Clear` to Deepgram TTS WS → audio output stops.
+5. Clears LiveKit `AudioSource` capture queue → in-flight 10ms frames discarded.
+6. Frontend `tts:interrupted` event → UI clears streaming transcript.
+7. New customer turn processed normally.
+
+Trade-off: ~100–300ms extra barge-in latency vs. zero self-interruption. Worth it.
 
 ---
 
 ## Why LiveKit + Socket.IO (Hybrid)
 
-The assessment requires LiveKit for WebRTC audio transport. We use it for:
-- **Room management** — create/delete rooms per call
-- **Access token generation** — authenticated session tokens
-- **Future: Egress** — could record full call to S3 server-side
+The assessment requires LiveKit for WebRTC audio transport. We use LiveKit for **the audio pipeline itself** via the official `@livekit/rtc-node` SDK:
 
-**We do NOT use LiveKit for the audio pipeline itself.** Here's why:
+- **Customer mic** → browser `LiveKitRoom` publishes 16kHz mono track → server `LiveKitTransport.setupAudioStream` subscribes → `agentPipeline.receiveAudio()` → Deepgram STT
+- **Agent voice** → Deepgram Aura → `livekitTransport.pushAgentAudio()` publishes via `AudioSource(16000)` → client `<RoomAudioRenderer />` plays it
 
-| Approach | Pros | Cons |
-|---|---|---|
-| Pure LiveKit (`@livekit/rtc-node`) | Spec-compliant; clean WebRTC | Native binaries; complex deploy; limited Node docs |
-| Hybrid (current) | Simple deploy; full pipeline control | Two transports; LiveKit underutilized |
-| Pure Socket.IO | Simplest | Misses spec |
+Socket.IO is used **exclusively for control events**: `call:start`, `transcript:interim`, `transcript:final`, `agent:thinking`, `agent:speaking`, `tts:interrupted`, `dead_air_detected`, `analysis:complete`, `prompt:evolved`. No raw audio crosses the Socket.IO channel.
 
-The hybrid design lets us:
-1. Show LiveKit token + room creation (assessment requirement)
-2. Control the audio pipeline directly for low latency
-3. Deploy without native compilation steps
-
-**Loom talking point:** "I chose hybrid transport because LiveKit Agents is Python-first; the Node alternative `@livekit/rtc-node` requires native binaries that complicate deploy. I kept LiveKit for room management and explicitly designed Socket.IO around the audio pipeline so latency and interruption logic stay in my control."
+**Loom talking point:** "LiveKit handles the audio plane end-to-end — both directions go through the LiveKit room. Socket.IO carries only the control plane (transcripts, scorecard, prompt evolution events). This split keeps the audio path WebRTC-native while letting me stream rich structured events to the UI with minimal overhead."
 
 ---
 

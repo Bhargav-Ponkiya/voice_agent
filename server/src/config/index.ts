@@ -16,19 +16,21 @@ for (const envPath of possiblePaths) {
   }
 }
 
-function required(name: string): string {
-  const val = process.env[name];
-  if (!val) throw new Error(`Missing required environment variable: ${name}`);
-  return val;
-}
-
 function optional(name: string, fallback: string): string {
   return process.env[name] || fallback;
 }
 
+// Support comma-separated origins so a single deploy can serve both the Vercel
+// production URL and a localhost dev frontend (or preview URLs).
+// Example: CLIENT_URL="https://novatel.vercel.app,http://localhost:5173"
+const rawClientUrl = optional('CLIENT_URL', 'http://localhost:5173');
+const clientOrigins = rawClientUrl.split(',').map((s) => s.trim()).filter(Boolean);
+
 export const config = {
   port: parseInt(optional('PORT', '3001')),
-  clientUrl: optional('CLIENT_URL', 'http://localhost:5173'),
+  // Single string when one origin (back-compat); array when multiple.
+  clientUrl: clientOrigins.length > 1 ? clientOrigins : clientOrigins[0],
+  clientOrigins,
   nodeEnv: optional('NODE_ENV', 'development'),
 
   livekit: {
@@ -39,11 +41,6 @@ export const config = {
 
   deepgram: {
     apiKey: optional('DEEPGRAM_API_KEY', ''),
-  },
-
-  anthropic: {
-    apiKey: optional('ANTHROPIC_API_KEY', ''),
-    model: optional('ANTHROPIC_MODEL', 'claude-haiku-4-5-20251001'),
   },
 
   gemini: {
@@ -57,6 +54,9 @@ export const config = {
   },
 
   uploads: {
-    dir: path.resolve(__dirname, '../../..', optional('UPLOADS_DIR', '../uploads/recordings')),
+    // Resolve UPLOADS_DIR against the project root (server/src/config -> ../../..).
+    // Default keeps recordings inside the project at <root>/uploads/recordings.
+    // Absolute paths in the env var are honored as-is.
+    dir: path.resolve(__dirname, '../../..', optional('UPLOADS_DIR', 'uploads/recordings')),
   },
 };

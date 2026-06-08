@@ -165,7 +165,7 @@ If `ready: false`, check which env var is `false` and re-verify Step 2.
 1. Open http://localhost:5173 in your browser
 2. Click **Start Call**
 3. **Allow microphone access** when prompted
-4. Wait for Alex (the agent) to greet you
+4. Wait for Sarah (the agent) to greet you
 5. Try one of these scenarios:
    - "My bill this month is wrong — I was charged twice"
    - "I want to cancel my plan, it's too expensive"
@@ -217,9 +217,10 @@ Check:
 - HTTPS not needed on `localhost` — `getUserMedia` works on `http://localhost`
 
 ### Agent never speaks
-- Check Deepgram API key is valid and has not expired
-- Check browser console for Socket.IO errors
-- Verify `tts:audio` events arrive in DevTools → Network → WS
+- Check Deepgram API key is valid and has not expired (powers BOTH STT and TTS)
+- Check browser console for LiveKit connection errors (agent voice flows through the LiveKit room, not Socket.IO)
+- In DevTools, confirm the WebRTC peer connection is "connected" and an inbound audio track is subscribed
+- Server logs should show `[DeepgramTTS] Received audio chunk: NNN bytes` lines — if absent, TTS isn't producing audio
 
 ---
 

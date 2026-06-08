@@ -44,7 +44,23 @@ export class LiveKitTransport {
     try {
       logger.info(`[LiveKitTransport] Connecting to room ${roomName}...`);
       const token = await createAgentToken(roomName);
-      await this.room.connect(config.livekit.url, token);
+
+      // Race the connect against a 45s timeout so a LiveKit Cloud outage doesn't
+      // leave call:start hanging forever on the client.
+      const CONNECT_TIMEOUT_MS = 45_000;
+      let timer: NodeJS.Timeout | null = null;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`LiveKit connect timed out after ${CONNECT_TIMEOUT_MS}ms`)),
+          CONNECT_TIMEOUT_MS
+        );
+      });
+      try {
+        await Promise.race([this.room.connect(config.livekit.url, token), timeout]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+
       this.isConnected = true;
       logger.info(`[LiveKitTransport] Connected to room ${roomName}`);
 
@@ -68,24 +84,33 @@ export class LiveKitTransport {
   private setupAudioStream(track: RemoteAudioTrack) {
     if (this.audioStream) {
       logger.warn('[LiveKitTransport] AudioStream already exists, replacing...');
+      // Bump the id BEFORE assigning so the previous reader loop exits the next time
+      // it observes a frame (or never, if the prior stream stalls).
+      this.activeStreamId++;
     }
 
     // Force resampling to 16000Hz mono so it perfectly matches Deepgram STT and CallRecorder expectations
     this.audioStream = new AudioStream(track, 16000, 1);
     const currentStreamId = ++this.activeStreamId;
-    
+    const localStream = this.audioStream;
+
     const readStream = async () => {
       try {
-        for await (const frame of this.audioStream as any) {
+        for await (const frame of localStream as any) {
           if (this.activeStreamId !== currentStreamId || !this.isConnected) break;
-          const buffer = Buffer.from(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
-          this.agentPipeline.receiveAudio(buffer);
+          // Deep copy: LiveKit's rtc-node reuses underlying ArrayBuffer slots between
+          // frames (the same bug noted in pushAgentAudio). Aliasing the shared buffer
+          // into the recorder/STT pipeline would let the next frame corrupt the previous one.
+          const src = frame.data;
+          const copy = Buffer.allocUnsafe(src.byteLength);
+          Buffer.from(src.buffer, src.byteOffset, src.byteLength).copy(copy);
+          this.agentPipeline.receiveAudio(copy);
         }
       } catch (err) {
         logger.error('[LiveKitTransport] AudioStream read error', err);
       }
     };
-    
+
     readStream();
     logger.info('[LiveKitTransport] Setup AudioStream to pipe customer mic to AgentPipeline');
   }
@@ -138,7 +163,13 @@ export class LiveKitTransport {
   }
 
   cleanup() {
+    // Idempotent: called from both RoomEvent.Disconnected and AgentPipeline.stop().
+    if (!this.isConnected && !this.room && !this.audioSource && !this.audioStream) {
+      return;
+    }
     this.isConnected = false;
+    // Bumping the stream id signals any in-flight readStream() loop to exit.
+    this.activeStreamId++;
     this.audioStream = null;
     this.audioSource = null;
     if (this.room) {

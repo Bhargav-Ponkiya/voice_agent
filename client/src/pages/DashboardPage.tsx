@@ -72,6 +72,35 @@ export default function DashboardPage() {
     load();
   }, [load]);
 
+  // Self-healing patches are generated AFTER analysis:complete (separate Gemini call,
+  // ~3–5s of additional work). If the user navigated here right after a call ended,
+  // v(n+1) may not be in the DB yet. Poll /api/prompts for a short window so the new
+  // version appears live without requiring a manual refresh click.
+  useEffect(() => {
+    if (loading) return;
+    const startCount = promptVersions.length;
+    const POLL_INTERVAL_MS = 3000;
+    const POLL_DURATION_MS = 20000;
+    let elapsed = 0;
+    const interval = setInterval(async () => {
+      elapsed += POLL_INTERVAL_MS;
+      try {
+        const versions = await getPromptVersions();
+        if (versions.length > startCount) {
+          setPromptVersions(versions);
+          clearInterval(interval);
+          return;
+        }
+      } catch {
+        // Ignore transient errors; keep polling until window expires.
+      }
+      if (elapsed >= POLL_DURATION_MS) clearInterval(interval);
+    }, POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+  // Run once per initial load. Re-running on every promptVersions change would loop forever.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
+
   const currentCallId = callId || allAnalyses[0]?.callId;
 
   // ─── Skeleton Loading State ─────────────────────────────────────────────

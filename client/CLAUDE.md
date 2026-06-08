@@ -1,6 +1,6 @@
 # Client — Frontend Context
 
-> Read the root [`CLAUDE.md`](../CLAUDE.md) first for full project context.
+> Read the project context doc at [`docs/CLAUDE.md`](../docs/CLAUDE.md) first for full project background.
 
 ## Stack
 React 18 · TypeScript · Vite 5 · **Tailwind v4 (CSS-first)** · Recharts · Socket.IO client · axios · lucide-react

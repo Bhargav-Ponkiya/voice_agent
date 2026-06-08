@@ -15,11 +15,17 @@ export class DeepgramSTT extends EventEmitter {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private keepAliveTimer: NodeJS.Timeout | null = null;
   private isConnected = false;
+  private isClosed = false;
   private pendingAudio: Buffer[] = [];
+  private droppedChunkCount = 0;
   /** Max buffered chunks while waiting for connection (prevents unbounded memory use) */
   private static readonly MAX_PENDING_CHUNKS = 50;
 
   connect(): void {
+    if (this.isClosed) {
+      logger.warn('[DeepgramSTT] connect() called after close() — ignoring');
+      return;
+    }
     const url = new URL('wss://api.deepgram.com/v1/listen');
     url.searchParams.set('model', 'nova-2');
     url.searchParams.set('language', 'en-US');
@@ -99,22 +105,29 @@ export class DeepgramSTT extends EventEmitter {
       logger.info(`Deepgram STT disconnected. Code: ${code}, Reason: ${reasonStr}`);
       this.emit('close');
 
-      // Auto-reconnect on unexpected close (not code 1000)
-      if (code !== 1000) {
+      // Auto-reconnect on unexpected close (not code 1000) — skip if we manually closed.
+      if (code !== 1000 && !this.isClosed) {
         logger.info('Deepgram STT attempting reconnect in 2 seconds...');
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
         this.reconnectTimer = setTimeout(() => {
-          this.connect();
+          if (!this.isClosed) this.connect();
         }, 2000);
       }
     });
   }
 
   sendAudio(chunk: Buffer): void {
+    if (this.isClosed) return;
     if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       // Cap pending buffer: drop oldest chunks if we hit the limit
       if (this.pendingAudio.length >= DeepgramSTT.MAX_PENDING_CHUNKS) {
         this.pendingAudio.shift();
+        this.droppedChunkCount++;
+        // Surface the drop periodically so a long STT outage is visible in logs and to the pipeline.
+        if (this.droppedChunkCount === 1 || this.droppedChunkCount % 25 === 0) {
+          logger.warn(`[DeepgramSTT] Dropping mic audio while disconnected — ${this.droppedChunkCount} chunk(s) lost so far`);
+          this.emit('audio_dropped', { count: this.droppedChunkCount });
+        }
       }
       this.pendingAudio.push(chunk);
       return;
@@ -123,6 +136,8 @@ export class DeepgramSTT extends EventEmitter {
   }
 
   close(): void {
+    if (this.isClosed) return;
+    this.isClosed = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -134,10 +149,14 @@ export class DeepgramSTT extends EventEmitter {
     if (this.ws) {
       try {
         this.ws.removeAllListeners();
+        this.ws.on('error', () => {}); // prevent uncaught 'error' after close
         this.ws.close();
       } catch {}
       this.ws = null;
     }
     this.isConnected = false;
+    this.pendingAudio = [];
+    // Drop EventEmitter consumers (agentPipeline registers 'transcript'/'speech_started'/'error')
+    this.removeAllListeners();
   }
 }

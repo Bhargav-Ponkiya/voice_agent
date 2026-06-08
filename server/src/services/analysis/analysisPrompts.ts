@@ -60,7 +60,7 @@ CRITICAL: Ensure your JSON strictly follows RFC 8259 formatting. Escape all quot
       "stage": "Greeting"
     }
   ],
-  "flags": [],
+  "flags": ["dead_air_at_00:42", "escalation_at_01:15"],
   "agent_signals": {
     "filler_words": 0,
     "avg_response_length_words": 0,
@@ -85,6 +85,26 @@ Rubric scoring:
 - policy_explained_clearly = 20 points
 - call_closed_with_resolution = 20 points
 - no_dead_air_over_3s = 15 points (based on dead air segments above)
+
+Sentiment detection guide (per customer turn):
+- positive: thanks, appreciation, "that makes sense", calm tone, accepts resolution
+- neutral: questions, information exchange, no emotion either way (DEFAULT)
+- frustrated: "ridiculous", "wrong", "overcharged", "this is unfair", "I've been waiting", repeated complaints
+- angry: "unacceptable", "outrageous", multiple !!!, ALL-CAPS WORDS, threats, demands to escalate
+
+Escalation triggers (REQUIRED — set escalation_trigger=true on any customer turn matching):
+- Literal phrases: "cancel", "speak to a manager", "supervisor", "lawyer", "lawsuit", "BBB", "Better Business Bureau", "report you", "file a complaint"
+- Raised tone signals: ALL-CAPS words (3+ chars), multiple exclamation marks (!!!), or multiple question marks (???)
+- Repeated pattern: customer raises the same complaint after the agent has already given two resolution attempts
+
+Filler word counting (REQUIRED — count occurrences in AGENT turns only):
+Count any of: "um", "uh", "like" (used as filler, not comparison), "you know", "basically", "so yeah", "I mean", "kind of", "sort of", "actually" (when used to backtrack). Lowercase comparison, whole-word match. Report the total integer in agent_signals.filler_words.
+
+Flags formatting (REQUIRED):
+- Every flag string must follow the pattern "<event>_at_MM:SS" (e.g. "dead_air_at_00:42", "escalation_at_01:15", "filler_burst_at_00:08")
+- Use snake_case for event names, mm:ss timestamps drawn from the transcript turn timestamps
+- Include flags for: any dead air segment listed above, any escalation_trigger=true in sentiment_arc, and any unresolved_objection moment
+- If nothing notable happened, return an empty array []
 
 The failure_moments array is critical — be specific and actionable.`;
 }

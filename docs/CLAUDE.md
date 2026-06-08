@@ -8,7 +8,7 @@
 
 A complete voice call agent system built for a full-stack engineering demonstration.
 
-**Persona:** Alex — customer support rep for **NovaTel**, a fictional telecom company. Handles billing complaints over a live browser-based voice call.
+**Persona:** Sarah — customer support rep for **NovaTel**, a fictional telecom company. Handles billing complaints over a live browser-based voice call.
 
 **Five capabilities (all built):**
 

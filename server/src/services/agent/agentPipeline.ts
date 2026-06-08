@@ -1,5 +1,6 @@
 import { Socket } from 'socket.io';
 import { EventEmitter } from 'events';
+import { performance } from 'perf_hooks';
 import { DeepgramSTT, DeepgramTranscript } from '../stt/deepgramService';
 import { DeepgramTTS } from '../tts/deepgramTtsService';
 
@@ -36,14 +37,34 @@ export class AgentPipeline extends EventEmitter {
 
   private deadAirCheckInterval: NodeJS.Timeout | null = null;
   private deadAirSegments: Array<{ startMs: number; endMs: number }> = [];
-  private lastSpeakMs = Date.now();
+  // Dead-air uses a monotonic clock so an NTP adjustment mid-call can't fabricate
+  // or erase a silence segment. callStartMs (Date.now() above) remains the wall-clock
+  // anchor for human-readable transcript timestamps.
+  private lastSpeakMs = performance.now();
   private potentialDeadAirStart: number | null = null;
+  private monoCallStart = performance.now();
 
   private isShuttingDown = false;
 
   /** Timestamp of last interruptTTS() call. Used to prevent duplicate STT speech_started
    *  events from immediately interrupting a brand-new agent turn. */
   private lastInterruptMs = 0;
+
+  /** Monotonic timestamp of the last agent audio chunk emitted — for diagnostics. */
+  private lastAgentAudioMs = 0;
+
+  /** Anti-self-interruption: count consecutive interims received during the current
+   *  agent response. Echo bleed from imperfect browser echo cancellation typically
+   *  produces 1 transient interim per leak; real user speech produces several in a row.
+   *  Require N>=2 to barge in — adds ~100-300ms to interruption latency but eliminates
+   *  the "Sarah cut herself off mid-sentence" failure mode. */
+  private interimCountThisResponse = 0;
+  private static readonly MIN_BARGE_IN_CHARS = 3;
+  private static readonly MIN_INTERIMS_TO_BARGE_IN = 2;
+
+  /** Monotonic timestamp captured the moment a user utterance flushes to Gemini.
+   *  Used to log the three latency milestones: first-LLM-token, first-TTS-audio, and end-to-end. */
+  private turnStartedAtMs: number | null = null;
 
   /**
    * Utterance accumulation buffer.
@@ -88,7 +109,7 @@ export class AgentPipeline extends EventEmitter {
       this.stt.on('transcript', (data: DeepgramTranscript) => {
         if (!data.text.trim()) return;
 
-        this.lastSpeakMs = Date.now();
+        this.lastSpeakMs = performance.now();
         if (this.potentialDeadAirStart !== null) {
           this.potentialDeadAirStart = null;
         }
@@ -97,11 +118,24 @@ export class AgentPipeline extends EventEmitter {
           logger.info(`[AgentPipeline] STT Interim transcript: "${data.text}"`);
           this.socket.emit('transcript:interim', { text: data.text, speaker: 'customer' });
 
-          // Robust Barge-In: Interrupt the agent ONLY when STT produces an actual transcribed word.
-          // This makes barge-in completely immune to echo clicks or chair squeaks that trigger VAD falsely.
-          if (this.isSpeaking && !this.isGreetingInProgress && data.text.trim().length > 0) {
-            logger.info(`[AgentPipeline] Barge-in triggered by interim transcript: "${data.text}"`);
-            this.interruptTTS();
+          // Anti-self-interruption barge-in. All four conditions must hold:
+          //   1. Sarah is currently speaking and we're not in the opening greeting.
+          //   2. The interim text is at least MIN_BARGE_IN_CHARS characters —
+          //      single-character fragments are almost always echo or noise.
+          //   3. We've now seen at least MIN_INTERIMS_TO_BARGE_IN interim updates
+          //      during this response. Echo bleed produces single transient blips;
+          //      real user speech produces a sustained stream of interims.
+          const trimmed = data.text.trim();
+          const longEnough = trimmed.length >= AgentPipeline.MIN_BARGE_IN_CHARS;
+
+          if (this.isSpeaking && !this.isGreetingInProgress && longEnough) {
+            this.interimCountThisResponse++;
+            if (this.interimCountThisResponse >= AgentPipeline.MIN_INTERIMS_TO_BARGE_IN) {
+              logger.info(`[AgentPipeline] Barge-in triggered after ${this.interimCountThisResponse} consecutive interims: "${trimmed}"`);
+              this.interruptTTS();
+            } else {
+              logger.debug(`[AgentPipeline] Barge-in deferred — only ${this.interimCountThisResponse} interim(s) so far: "${trimmed}"`);
+            }
           }
 
           // Reset utterance debounce on every interim — it proves user is still speaking.
@@ -163,6 +197,10 @@ export class AgentPipeline extends EventEmitter {
             startMs: timestampMs,
           });
 
+          // Latency anchor: turn officially starts when we hand the utterance to the LLM.
+          this.turnStartedAtMs = performance.now();
+          logger.info(`[Latency] Turn started — utterance flushed to LLM`);
+
           this.handleCustomerInput(fullUtterance, timestamp).catch((err) => {
             logger.error('Agent pipeline error', err);
             this.socket.emit('agent:error', { message: 'Agent encountered an error' });
@@ -174,7 +212,7 @@ export class AgentPipeline extends EventEmitter {
 
       this.stt.on('speech_started', () => {
         // We no longer cancel debounce here to avoid VAD deadlocks.
-        this.lastSpeakMs = Date.now();
+        this.lastSpeakMs = performance.now();
       });
 
       this.stt.on('error', (err) => {
@@ -227,6 +265,11 @@ export class AgentPipeline extends EventEmitter {
     const MAX_RETRIES = 1;
     const RETRY_DELAY_MS = 2500;
 
+    // Anchor the interrupt counter at the start so we can detect interrupts during the retry wait.
+    // interruptTTS() advances lastInterruptMs — if it moves past this anchor, the user spoke again
+    // and we must abort the retry instead of speaking over them.
+    const interruptAnchor = this.lastInterruptMs;
+
     while (retryCount <= MAX_RETRIES) {
       try {
         await this.streamAgentResponse(text, false);
@@ -241,8 +284,11 @@ export class AgentPipeline extends EventEmitter {
           logger.warn(`[AgentPipeline] handleCustomerInput: Gemini transient error (${errStr.slice(0, 60)}). Retrying in ${RETRY_DELAY_MS}ms (attempt ${retryCount}/${MAX_RETRIES})...`);
           this.socket.emit('agent:retry', { message: 'Momentary delay — retrying...', attempt: retryCount });
           await new Promise<void>((r) => setTimeout(r, RETRY_DELAY_MS));
-          // Check if we were shut down or interrupted during the wait
-          if (this.isShuttingDown || this.currentSpeakId > (this.currentSpeakId)) break;
+          // Bail out if we were shut down or the user interrupted during the wait.
+          if (this.isShuttingDown || this.lastInterruptMs > interruptAnchor) {
+            logger.info('[AgentPipeline] handleCustomerInput: retry skipped (shutdown or interrupt during wait)');
+            break;
+          }
         } else {
           throw err; // surface to outer error handler
         }
@@ -256,6 +302,10 @@ export class AgentPipeline extends EventEmitter {
   ): Promise<void> {
     const speakId = ++this.currentSpeakId;
     logger.info(`[AgentPipeline] streamAgentResponse called. userText: "${userText}", isGreeting: ${isGreeting}, speakId: ${speakId}`);
+
+    // Reset anti-self-interruption interim counter — a fresh response gets a fresh ledger.
+    this.interimCountThisResponse = 0;
+
     if (!isGreeting) {
       this.conversationHistory.push({ role: 'user', content: userText });
     }
@@ -310,10 +360,19 @@ export class AgentPipeline extends EventEmitter {
         audioChunksCount++;
         if (audioChunksCount === 1) {
           logger.info(`[AgentPipeline] Deepgram first audio chunk received: ${chunk.length} bytes`);
+          // Latency milestone #2: first audible TTS byte ready to push to LiveKit.
+          // This is the user-perceptible "agent starts speaking" moment.
+          if (this.turnStartedAtMs !== null && !isGreeting) {
+            const elapsedMs = Math.round(performance.now() - this.turnStartedAtMs);
+            const verdict = elapsedMs < 1500 ? 'WITHIN BUDGET' : 'OVER BUDGET';
+            logger.info(`[Latency] first_audio = ${elapsedMs}ms (target <1500ms) — ${verdict}`);
+          }
         }
         this.recorder.addAgentAudio(chunk);
         this.livekitTransport.pushAgentAudio(chunk);
-        this.lastSpeakMs = Date.now();
+        const now = performance.now();
+        this.lastSpeakMs = now;
+        this.lastAgentAudioMs = now;
       });
 
       addTtsListener('error', (err: Error) => {
@@ -370,8 +429,24 @@ export class AgentPipeline extends EventEmitter {
       logger.info('[AgentPipeline] Requesting Gemini stream...');
       const stream = streamResponse(this.systemPrompt, this.conversationHistory, abortSignal);
 
+      let firstTokenLogged = false;
       for await (const chunk of stream) {
         if (abortSignal.aborted) break;
+        // If the TTS WS dropped mid-stream, stop pulling Gemini tokens — they would just
+        // be discarded silently. Abort the turn so the client gets a clean error rather
+        // than seeing a transcript without audio.
+        if (!ttsInstance.connected) {
+          logger.warn(`[AgentPipeline] TTS WS disconnected mid-stream — aborting turn. speakId: ${speakId}`);
+          this.currentAbortController?.abort();
+          this.socket.emit('call:error', { message: 'Voice generator dropped — please try again' });
+          break;
+        }
+        // Latency milestone #1: time-to-first-token from the LLM. Dominant cost of the budget.
+        if (!firstTokenLogged && this.turnStartedAtMs !== null && !isGreeting) {
+          const elapsedMs = Math.round(performance.now() - this.turnStartedAtMs);
+          logger.info(`[Latency] first_token = ${elapsedMs}ms (Gemini TTFT)`);
+          firstTokenLogged = true;
+        }
         fullResponse += chunk;
         sentenceBuffer += chunk;
 
@@ -391,9 +466,15 @@ export class AgentPipeline extends EventEmitter {
         }
       }
 
-      if (!abortSignal.aborted && sentenceBuffer.trim()) {
+      // Only flush a trailing partial if it looks like real content (has letters and >=2 chars).
+      // Otherwise it's noise from a cut-off stream that would arrive as half a word.
+      if (!abortSignal.aborted && ttsInstance.connected) {
         const remaining = sentenceBuffer.trim();
-        ttsInstance.sendText(remaining + ' ');
+        if (remaining.length >= 2 && /[A-Za-z]/.test(remaining)) {
+          ttsInstance.sendText(remaining + ' ');
+        } else if (remaining) {
+          logger.warn(`[AgentPipeline] Skipping trailing partial sentence: "${remaining}"`);
+        }
       }
 
       if (!abortSignal.aborted && ttsInstance.connected) {
@@ -432,7 +513,7 @@ export class AgentPipeline extends EventEmitter {
       // stuck in isSpeaking=true state after any non-AbortError exception.
       if (this.currentSpeakId === speakId) {
         this.isSpeaking = false;
-        this.lastSpeakMs = Date.now();
+        this.lastSpeakMs = performance.now();
       }
       // Clear any partial streaming transcript on the client if this speak is ending
       if (this.currentSpeakId === speakId) {
@@ -481,8 +562,10 @@ export class AgentPipeline extends EventEmitter {
 
   private extractSentences(text: string): { sentences: string[]; remaining: string } {
     const sentences: string[] = [];
-    // Split on sentence-ending punctuation followed by space or end
-    const parts = text.split(/(?<=[.!?])\s+/);
+    // Split on sentence-ending punctuation (. ! ?) followed by whitespace, OR on
+    // colon/semicolon/newline — these are natural pause points Gemini emits and
+    // flushing on them gets TTS started sooner without hurting prosody.
+    const parts = text.split(/(?<=[.!?:;])\s+|(?<=\n)/);
 
     if (parts.length <= 1) {
       return { sentences: [], remaining: text };
@@ -498,7 +581,8 @@ export class AgentPipeline extends EventEmitter {
 
   private startDeadAirDetection(): void {
     this.deadAirCheckInterval = setInterval(() => {
-      const silenceDurationMs = Date.now() - this.lastSpeakMs;
+      const now = performance.now();
+      const silenceDurationMs = now - this.lastSpeakMs;
       const DEAD_AIR_THRESHOLD = 3000;
 
       if (silenceDurationMs > DEAD_AIR_THRESHOLD) {
@@ -506,10 +590,10 @@ export class AgentPipeline extends EventEmitter {
           this.potentialDeadAirStart = this.lastSpeakMs;
         }
       } else if (this.potentialDeadAirStart !== null) {
-        const deadAirDuration = Date.now() - this.potentialDeadAirStart;
+        const deadAirDuration = now - this.potentialDeadAirStart;
         if (deadAirDuration > DEAD_AIR_THRESHOLD) {
-          const startMs = this.potentialDeadAirStart - this.callStartMs;
-          const endMs = Date.now() - this.callStartMs;
+          const startMs = this.potentialDeadAirStart - this.monoCallStart;
+          const endMs = now - this.monoCallStart;
           this.deadAirSegments.push({ startMs, endMs });
           this.socket.emit('dead_air_detected', {
             timestamp: formatTimestamp(startMs),
@@ -544,8 +628,8 @@ export class AgentPipeline extends EventEmitter {
 
     // Finalize any pending dead air segment that was in progress when call ended
     if (this.potentialDeadAirStart !== null) {
-      const startMs = this.potentialDeadAirStart - this.callStartMs;
-      const endMs = Date.now() - this.callStartMs;
+      const startMs = this.potentialDeadAirStart - this.monoCallStart;
+      const endMs = performance.now() - this.monoCallStart;
       if (endMs - startMs > 3000) {
         this.deadAirSegments.push({ startMs, endMs });
       }
@@ -565,6 +649,15 @@ export class AgentPipeline extends EventEmitter {
       this.tts = null;
     }
     this.stt.close();
+
+    // Disconnect LiveKit BEFORE finalizing the recording — otherwise the room can
+    // emit a few more customer frames into a half-finalized recorder, and the
+    // agent's audio track stays live in the room until the async deleteRoom() call.
+    try {
+      this.livekitTransport.cleanup();
+    } catch (err) {
+      logger.warn('[AgentPipeline] LiveKit cleanup failed during stop()', err);
+    }
 
     const audioFile = await this.recorder.finalize();
 

@@ -33,6 +33,9 @@ export class DeepgramTTS extends EventEmitter {
       // Appending query parameters
       // Using aura-2-asteria-en (Asteria is highly recommended for speed and friendly female tone)
       const modelName = 'aura-2-asteria-en';
+      // sample_rate=16000 must match LiveKit AudioSource(16000) in LiveKitTransport and
+      // the recorder's 16kHz WAV format. The agent voice path is fully LiveKit-based:
+      // Deepgram → livekitTransport.pushAgentAudio → LiveKit room → client <RoomAudioRenderer />.
       const url = `wss://api.deepgram.com/v1/speak?model=${modelName}&encoding=linear16&sample_rate=16000`;
       
       logger.info(`[DeepgramTTS] Connecting to WebSocket: wss://api.deepgram.com/v1/speak?model=${modelName}...`);

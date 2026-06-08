@@ -1,0 +1,61 @@
+# Render Blueprint — deploys the NovaTel Voice Agent backend.
+# Usage: connect this repo on render.com, Render auto-detects this file.
+# All API keys must be set as environment variables in the Render dashboard
+# (or as Secret Files) before the first deploy.
+
+services:
+  - type: web
+    name: novatel-voice-agent-backend
+    env: node
+    region: oregon          # change to your nearest region
+    plan: starter           # free tier is fine for the demo; starter has persistent disk
+
+    # Build the server workspace only — Vercel handles the frontend separately.
+    buildCommand: npm install && npm --workspace server run build
+
+    # The build step compiles TS into server/dist; start it from there.
+    startCommand: node server/dist/index.js
+
+    # Health check endpoint validates env vars + Mongo connectivity.
+    healthCheckPath: /api/health
+
+    # WebSockets (LiveKit SDK, Socket.IO, Deepgram WS) — Render web services
+    # support them by default. No extra config needed.
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # CLIENT_URL accepts comma-separated origins so prod + preview URLs both work.
+      # Example: "https://novatel-voice.vercel.app,https://novatel-voice-git-main.vercel.app"
+      - key: CLIENT_URL
+        sync: false        # must be set manually in dashboard
+
+      - key: MONGODB_URI
+        sync: false        # Atlas connection string — Secret
+
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+
+      - key: DEEPGRAM_API_KEY
+        sync: false
+
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+
+      # Recordings: Render free disk is ephemeral. Keep this default — for persistent
+      # storage, attach a Render Disk and point UPLOADS_DIR at its mount path.
+      - key: UPLOADS_DIR
+        value: uploads/recordings
+
+    # Uncomment to attach a persistent disk for call recordings (paid plan).
+    # disk:
+    #   name: recordings
+    #   mountPath: /opt/render/project/src/uploads/recordings
+    #   sizeGB: 1

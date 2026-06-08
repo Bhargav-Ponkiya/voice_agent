@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { promises as fsp } from 'fs';
 import path from 'path';
 
 export function int16ToFloat32(buffer: Buffer): Float32Array {
@@ -11,17 +12,14 @@ export function int16ToFloat32(buffer: Buffer): Float32Array {
   return float32;
 }
 
-export function writeWavFile(
-  filePath: string,
-  pcmChunks: Buffer[],
+function buildWavHeader(
+  dataSize: number,
   sampleRate: number,
   channels: number,
   bitsPerSample: number
-): void {
-  const pcmData = Buffer.concat(pcmChunks);
+): Buffer {
   const byteRate = (sampleRate * channels * bitsPerSample) / 8;
   const blockAlign = (channels * bitsPerSample) / 8;
-  const dataSize = pcmData.length;
   const header = Buffer.alloc(44);
 
   header.write('RIFF', 0);
@@ -38,9 +36,32 @@ export function writeWavFile(
   header.write('data', 36);
   header.writeUInt32LE(dataSize, 40);
 
-  const wavBuffer = Buffer.concat([header, pcmData]);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, wavBuffer);
+  return header;
+}
+
+/**
+ * Async WAV writer. Streams the header and PCM chunks directly to disk so we
+ * don't allocate a second copy of (potentially multi-megabyte) PCM data.
+ */
+export async function writeWavFile(
+  filePath: string,
+  pcmChunks: Buffer[],
+  sampleRate: number,
+  channels: number,
+  bitsPerSample: number
+): Promise<void> {
+  const dataSize = pcmChunks.reduce((acc, b) => acc + b.length, 0);
+  const header = buildWavHeader(dataSize, sampleRate, channels, bitsPerSample);
+
+  await fsp.mkdir(path.dirname(filePath), { recursive: true });
+  await new Promise<void>((resolve, reject) => {
+    const out = fs.createWriteStream(filePath);
+    out.on('error', reject);
+    out.on('finish', resolve);
+    out.write(header);
+    for (const chunk of pcmChunks) out.write(chunk);
+    out.end();
+  });
 }
 
 export function mergeAudioChannels(

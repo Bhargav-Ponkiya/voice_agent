@@ -1,6 +1,6 @@
 # Server — Backend Context
 
-> Read the root [`CLAUDE.md`](../CLAUDE.md) first for full project context.
+> Read the project context doc at [`docs/CLAUDE.md`](../docs/CLAUDE.md) first for full project background.
 
 ## Stack
 Node.js 18+ · TypeScript (target ES2022) · Express · Socket.IO · MongoDB/Mongoose

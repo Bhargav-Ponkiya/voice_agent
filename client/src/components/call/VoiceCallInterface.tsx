@@ -61,6 +61,12 @@ export default function VoiceCallInterface({ onCallComplete }: Props) {
   /** Tracks the speakId of the current streaming response so we can clear on interrupt */
   const streamingSpeakIdRef = useRef<number | null>(null);
 
+  /** rAF-based throttle for streaming text. Gemini emits 10-30 chunks per response;
+   *  without throttling, each chunk re-renders the whole call interface (including the
+   *  LiveKitRoom subtree), causing visible re-render judder during Sarah's speech. */
+  const streamingBufferRef = useRef('');
+  const streamingFlushScheduledRef = useRef(false);
+
   const socketRef = useRef<Socket | null>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const turnIdRef = useRef(0);
@@ -84,6 +90,9 @@ export default function VoiceCallInterface({ onCallComplete }: Props) {
   const handleStartCall = async () => {
     if (socketRef.current) {
       try {
+        // Detach listeners BEFORE disconnecting so the old socket's async 'disconnect'
+        // event can't mutate state for the new socket (e.g., flipping us to 'error').
+        socketRef.current.removeAllListeners();
         socketRef.current.disconnect();
       } catch (e) { /* ignore */ }
       socketRef.current = null;
@@ -157,19 +166,27 @@ export default function VoiceCallInterface({ onCallComplete }: Props) {
         setAgentStatus('speaking');
       });
 
-      // Real-time word-by-word transcript from Gemini as it streams
+      // Real-time word-by-word transcript from Gemini as it streams.
+      // We accumulate into a ref and flush to React state at most once per animation frame.
       socket.on('transcript:agent_stream', ({ chunk, speakId }: { chunk: string; speakId: number }) => {
         if (streamingSpeakIdRef.current !== speakId) {
-          // New speak turn — reset accumulation
           streamingSpeakIdRef.current = speakId;
-          setStreamingAgentText(chunk);
+          streamingBufferRef.current = chunk;
         } else {
-          setStreamingAgentText((prev) => prev + chunk);
+          streamingBufferRef.current += chunk;
+        }
+        if (!streamingFlushScheduledRef.current) {
+          streamingFlushScheduledRef.current = true;
+          requestAnimationFrame(() => {
+            streamingFlushScheduledRef.current = false;
+            setStreamingAgentText(streamingBufferRef.current);
+          });
         }
       });
 
       socket.on('transcript:agent_stream_end', ({ speakId }: { speakId: number }) => {
         if (streamingSpeakIdRef.current === speakId) {
+          streamingBufferRef.current = '';
           setStreamingAgentText('');
           streamingSpeakIdRef.current = null;
         }
@@ -292,7 +309,11 @@ export default function VoiceCallInterface({ onCallComplete }: Props) {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
       if (analysisTimerRef.current) clearTimeout(analysisTimerRef.current);
-      socketRef.current?.disconnect();
+      if (socketRef.current) {
+        socketRef.current.removeAllListeners();
+        socketRef.current.disconnect();
+        socketRef.current = null;
+      }
     };
   }, []);
 
@@ -495,7 +516,10 @@ export default function VoiceCallInterface({ onCallComplete }: Props) {
           serverUrl={livekitUrl}
           token={livekitToken}
           connect={isCallActive}
-          audio={!isMuted}
+          // audio is true once at connect. Mute toggling is driven inside MicToggle via
+          // localParticipant.setMicrophoneEnabled — flipping the LiveKitRoom audio prop
+          // would re-publish the track and can drop frames during a live call.
+          audio={true}
           video={false}
           onDisconnected={handleEndCall}
         >

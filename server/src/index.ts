@@ -24,15 +24,24 @@ fs.mkdirSync(config.uploads.dir, { recursive: true });
 const app = express();
 const httpServer = createServer(app);
 
+// CORS origin function: accept any origin listed in CLIENT_URL (comma-separated).
+// Same-origin server-to-server calls (no Origin header) are always allowed.
+const corsOriginCheck = (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
+  if (!origin) return cb(null, true);
+  if (config.clientOrigins.includes(origin)) return cb(null, true);
+  cb(new Error(`CORS: origin "${origin}" not in CLIENT_URL allowlist`));
+};
+
 const io = new SocketIO(httpServer, {
   cors: {
-    origin: config.clientUrl,
+    origin: config.clientOrigins.length > 1 ? config.clientOrigins : config.clientOrigins[0],
     methods: ['GET', 'POST'],
+    credentials: true,
   },
   maxHttpBufferSize: 1e7, // 10MB for audio chunks
 });
 
-app.use(cors({ origin: config.clientUrl }));
+app.use(cors({ origin: corsOriginCheck, credentials: true }));
 app.use(express.json({ limit: '1mb' })); // Prevent JSON body abuse
 app.use('/uploads', express.static(config.uploads.dir));
 

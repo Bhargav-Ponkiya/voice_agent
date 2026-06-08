@@ -2,6 +2,14 @@
 
 A complete, working voice call agent loop featuring real-time WebRTC audio, advanced STT/TTS streaming, AI QA analysis, and a fully autonomous **self-healing prompt loop**.
 
+## 📚 Documentation Map
+| File | What's in it |
+|---|---|
+| [PROMPTS.md](./PROMPTS.md) | All AI prompts: v1 agent prompt, analysis prompt, self-healing meta-prompt |
+| [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | System diagrams, latency budget breakdown, design trade-offs |
+| [docs/SETUP.md](./docs/SETUP.md) | Detailed local setup walkthrough (accounts → demo) |
+| [docs/TROUBLESHOOTING.md](./docs/TROUBLESHOOTING.md) | Common errors and fixes |
+
 ## 🚀 Architecture & Tech Stack
 
 This project implements a highly optimized, low-latency voice AI pipeline:
@@ -123,3 +131,46 @@ You are Sarah, a customer support representative for NovaTel...
 ## ⚠️ Known Limitations
 - **Diarization**: Real-time diarization over WebRTC is achieved via discrete speaker streams rather than post-processing, which is highly accurate but requires both parties to use headsets to prevent heavy AEC bleed.
 - **Agent Latency**: The initial connection to Gemini 2.5 Flash can occasionally take ~2s to warm up the context window if the instance is cold. Subsequent turns achieve the targeted <1.5s latency.
+
+---
+
+## 🚀 Deployment (Render + Vercel)
+
+The repo ships with `render.yaml` (backend) and `vercel.json` (frontend) so both providers can deploy from this single repo.
+
+### Backend — Render
+
+1. Push the repo to GitHub. On [render.com](https://render.com), click **New → Blueprint** and point it at the repo. Render detects `render.yaml` and provisions a Node web service.
+2. In the service **Environment** tab, set these vars (the blueprint marks them `sync: false`):
+   - `MONGODB_URI` — Atlas connection string
+   - `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`
+   - `DEEPGRAM_API_KEY`
+   - `GEMINI_API_KEY`
+   - `CLIENT_URL` — your Vercel URL (set this AFTER the frontend deploys; can include multiple comma-separated origins, e.g. `https://novatel.vercel.app,https://novatel-git-main.vercel.app`)
+3. Deploy. Render runs `npm install && npm --workspace server run build` then `node server/dist/index.js`.
+4. After boot, hit `https://<your-service>.onrender.com/api/health` — it must return `{ "ready": true, ... }`. If any `services.*` is false, that env var is missing or mistyped.
+
+**Free-tier caveats:**
+- Render free instances **sleep after 15 min idle**; first request after sleep takes ~30s. **For your Loom recording, warm the backend first** by visiting `/api/health` in a browser and waiting for the JSON response before clicking "Start Call". Otherwise the LiveKit token request times out while the dyno spins up.
+- Disk is **ephemeral** — call recordings are lost on restart. For persistence, uncomment the `disk:` block in `render.yaml` (requires paid plan) or wire an S3 backend.
+- Optional: enable `LOG_TO_FILE=1` only if you want file logs (default off in prod since Render captures stdout). Default `LOG_LEVEL` in production is `warn`; set `LOG_LEVEL=info` if you need verbose traces.
+
+### Frontend — Vercel
+
+1. On [vercel.com](https://vercel.com), **New Project → Import Git Repository**. Pick the repo. Vercel reads `vercel.json` — build command is set, output dir is `client/dist`.
+2. Add one environment variable under **Settings → Environment Variables**:
+   - `VITE_API_URL` = your Render backend URL (no trailing slash). Example: `https://novatel-voice-agent.onrender.com`
+3. Deploy. Note the production URL — paste it back into Render's `CLIENT_URL` env var (step 2 above) and redeploy the backend so CORS allows it.
+
+### Order of operations
+1. Deploy backend to Render first (note its URL).
+2. Set `VITE_API_URL` on Vercel → deploy frontend (note its URL).
+3. Set `CLIENT_URL` on Render → redeploy backend.
+4. Visit the Vercel URL, place a call, watch Render logs.
+
+### Common deployment gotchas
+- **Mic permission requires HTTPS in production.** Both Render and Vercel give you HTTPS by default — works.
+- **WebSocket connections (LiveKit, Socket.IO, Deepgram) work over Render web services** out of the box. No special config needed.
+- **If you see a CORS error after deploy**, `CLIENT_URL` on Render is wrong. The error message in browser console will name the rejected origin; copy that exactly into `CLIENT_URL`.
+- **`/api/health` is the single source of truth** for misconfigurations — always check it first when something behaves oddly post-deploy.
+

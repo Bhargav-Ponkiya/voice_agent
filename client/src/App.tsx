@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom';
 import CallPage from './pages/CallPage';
 import DashboardPage from './pages/DashboardPage';
+import { ErrorBoundary } from './components/shared/ErrorBoundary';
 import { PhoneCall, AlertTriangle } from 'lucide-react';
 
 function NotFoundPage() {
@@ -30,12 +31,14 @@ function NotFoundPage() {
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<CallPage />} />
-        <Route path="/dashboard" element={<DashboardPage />} />
-        <Route path="/dashboard/:callId" element={<DashboardPage />} />
-        <Route path="*" element={<NotFoundPage />} />
-      </Routes>
+      <ErrorBoundary>
+        <Routes>
+          <Route path="/" element={<ErrorBoundary><CallPage /></ErrorBoundary>} />
+          <Route path="/dashboard" element={<ErrorBoundary><DashboardPage /></ErrorBoundary>} />
+          <Route path="/dashboard/:callId" element={<ErrorBoundary><DashboardPage /></ErrorBoundary>} />
+          <Route path="*" element={<NotFoundPage />} />
+        </Routes>
+      </ErrorBoundary>
     </BrowserRouter>
   );
 }
