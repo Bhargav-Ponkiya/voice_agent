@@ -237,36 +237,45 @@ export class AgentPipeline extends EventEmitter {
 
       this.startDeadAirDetection();
 
-      // Wait for client:ready (sent by client when LiveKit Room onConnected triggers)
-      // or fall back to a 4s safety timeout if the event is missed.
-      logger.info('[AgentPipeline] Waiting for client WebRTC connection to stabilize...');
-      const clientReadyPromise = new Promise<void>((resolve) => {
-        this.clientReadyResolver = resolve;
-      });
-      const fallbackTimeout = new Promise<void>((resolve) => {
-        setTimeout(() => {
-          if (this.clientReadyResolver) {
-            logger.warn('[AgentPipeline] client:ready timed out (4s fallback) — greeting starting');
-            this.clientReadyResolver();
-            this.clientReadyResolver = null;
-          }
-          resolve();
-        }, 4000);
-      });
-      await Promise.race([clientReadyPromise, fallbackTimeout]);
-      if (this.isShuttingDown) return;
-
-      // Additional 500ms delay to ensure browser audio context & track subscription are fully active
-      await new Promise<void>((resolve) => setTimeout(resolve, 500));
-      if (this.isShuttingDown) return;
-
-      // Send the initial agent greeting
-      await this.sendAgentGreeting();
+      this.triggerBackgroundGreeting();
     } catch (err) {
       logger.error('[AgentPipeline] Error during start, calling stop() to cleanup...', err);
       await this.stop();
       throw err;
     }
+  }
+
+  private triggerBackgroundGreeting(): void {
+    setImmediate(async () => {
+      try {
+        logger.info('[AgentPipeline] Waiting for client WebRTC connection to stabilize...');
+        const clientReadyPromise = new Promise<void>((resolve) => {
+          this.clientReadyResolver = resolve;
+        });
+        const fallbackTimeout = new Promise<void>((resolve) => {
+          setTimeout(() => {
+            if (this.clientReadyResolver) {
+              logger.warn('[AgentPipeline] client:ready timed out (4s fallback) — greeting starting');
+              this.clientReadyResolver();
+              this.clientReadyResolver = null;
+            }
+            resolve();
+          }, 4000);
+        });
+        await Promise.race([clientReadyPromise, fallbackTimeout]);
+        if (this.isShuttingDown) return;
+
+        // Additional 500ms delay to ensure browser audio context & track subscription are fully active
+        await new Promise<void>((resolve) => setTimeout(resolve, 500));
+        if (this.isShuttingDown) return;
+
+        await this.sendAgentGreeting();
+      } catch (err) {
+        logger.error('[AgentPipeline] Error during background greeting:', err);
+        this.socket.emit('call:error', { message: 'Failed to generate greeting' });
+        await this.stop();
+      }
+    });
   }
 
   private async sendAgentGreeting(): Promise<void> {

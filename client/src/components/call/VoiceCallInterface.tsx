@@ -516,11 +516,11 @@ export default function VoiceCallInterface({ onCallComplete }: Props) {
 
   return (
     <>
-      {livekitToken && livekitUrl && isCallActive ? (
+      {livekitToken && livekitUrl && (isCallActive || status === 'connecting') ? (
         <LiveKitRoom
           serverUrl={livekitUrl}
           token={livekitToken}
-          connect={isCallActive}
+          connect={isCallActive || status === 'connecting'}
           // audio is true once at connect. Mute toggling is driven inside MicToggle via
           // localParticipant.setMicrophoneEnabled — flipping the LiveKitRoom audio prop
           // would re-publish the track and can drop frames during a live call.
