@@ -1,5 +1,4 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
   "name": "novatel-voice-agent-frontend",
   "buildCommand": "npm install && npm --workspace client run build",
   "outputDirectory": "client/dist",
