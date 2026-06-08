@@ -11,7 +11,7 @@ services:
     plan: free              # free tier doesn't require a credit card
 
     # Build the server workspace only — Vercel handles the frontend separately.
-    buildCommand: npm install && npm --workspace server run build
+    buildCommand: npm install --include=dev && npm --workspace server run build
 
     # The build step compiles TS into server/dist; start it from there.
     startCommand: node server/dist/index.js
