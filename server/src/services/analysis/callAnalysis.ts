@@ -5,6 +5,7 @@ import { Analysis } from '../../database/models/Analysis';
 import { Transcript } from '../../database/models/Transcript';
 import { logger } from '../../utils/logger';
 import { parseRobustJson } from '../../utils/jsonUtils';
+import { getCurrentPrompt, generateAndApplyPatch } from '../promptEvolution/selfHealingPrompt';
 
 export async function runCallAnalysis(
   callId: string,
@@ -12,7 +13,7 @@ export async function runCallAnalysis(
   durationSeconds: number,
   deadAirSegments: Array<{ startMs: number; endMs: number; durationMs: number; timestamp: string }>,
   promptVersion: number
-): Promise<typeof Analysis.prototype | null> {
+): Promise<{ analysis: any; patch: { version: number; summary: string } | null } | null> {
   const formattedTranscript = buildTranscriptText(turns);
 
   // Save transcript to DB
@@ -44,12 +45,17 @@ export async function runCallAnalysis(
     return null;
   }
 
+  const current = await getCurrentPrompt();
+  const nextVersion = current.version + 1;
+
   const prompt = buildAnalysisPrompt(
     callId,
     formattedTranscript,
     durationSeconds,
     deadAirSegments,
-    promptVersion
+    promptVersion,
+    current.systemPrompt,
+    nextVersion
   );
 
   let retryCount = 0;
@@ -80,16 +86,30 @@ export async function runCallAnalysis(
     }
   }
 
+  // Extract prompt patch if generated
+  const promptPatch = scorecard.prompt_patch;
+  const scorecardToSave = { ...scorecard };
+  delete scorecardToSave.prompt_patch;
+
+  let appliedPatch: { version: number; summary: string } | null = null;
+  if (scorecard.rubric_score < 90 && promptPatch) {
+    try {
+      appliedPatch = await generateAndApplyPatch(callId, scorecard.rubric_score, promptPatch);
+    } catch (patchErr) {
+      logger.error('Failed to apply generated prompt patch in post-call analysis', patchErr);
+    }
+  }
+
   try {
     // Persist to DB
     const analysis = await Analysis.findOneAndUpdate(
       { callId },
-      { ...scorecard, callId, prompt_version: promptVersion },
+      { ...scorecardToSave, callId, prompt_version: promptVersion },
       { upsert: true, new: true }
     );
 
     logger.info(`Call ${callId} analyzed — score: ${scorecard.rubric_score}/100`);
-    return analysis;
+    return { analysis, patch: appliedPatch };
   } catch (err) {
     logger.error(`Call analysis database persistence failed for ${callId}`, err);
     throw err;

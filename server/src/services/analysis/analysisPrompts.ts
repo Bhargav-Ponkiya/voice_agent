@@ -11,13 +11,15 @@ export function buildAnalysisPrompt(
   formattedTranscript: string,
   durationSeconds: number,
   deadAirSegments: Array<{ startMs: number; endMs: number; durationMs: number; timestamp: string }>,
-  promptVersion: number
+  promptVersion: number,
+  currentPrompt: string,
+  nextVersion: number
 ): string {
   const deadAirSummary = deadAirSegments.length > 0
     ? deadAirSegments.map((s) => `  - ${s.timestamp} gap of ${(s.durationMs / 1000).toFixed(1)}s`).join('\n')
     : '  - None detected';
 
-  return `You are a quality assurance analyst for an AI voice agent at a telecom company. Analyze the following call transcript and return a structured JSON scorecard. Base every finding STRICTLY on the transcript text — do not infer or hallucinate events that are not in the text.
+  return `You are a quality assurance analyst and prompt optimization system for an AI voice agent at a telecom company. Analyze the following call transcript and return a structured JSON scorecard. Base every finding STRICTLY on the transcript text.
 
 TRANSCRIPT:
 ${formattedTranscript}
@@ -28,6 +30,11 @@ CALL METADATA:
 - Dead air segments detected:
 ${deadAirSummary}
 - Prompt version: ${promptVersion}
+
+CURRENT AGENT SYSTEM PROMPT (version ${promptVersion}):
+<current_prompt>
+${currentPrompt}
+</current_prompt>
 
 Return ONLY valid JSON (no markdown, no explanation, no code fences) in exactly this format.
 CRITICAL: Ensure your JSON strictly follows RFC 8259 formatting. Escape all quotes inside strings as \\" and encode all newlines inside strings as \\n. DO NOT output any raw newlines or unescaped quotes inside any string value, as this will crash the JSON parser.
@@ -76,8 +83,35 @@ CRITICAL: Ensure your JSON strictly follows RFC 8259 formatting. Escape all quot
       "customer_text": "string",
       "severity": "low"
     }
-  ]
+  ],
+  "prompt_patch": {
+    "patches": [
+      {
+        "patch_type": "addition",
+        "target_section": "string",
+        "instruction": "string",
+        "failure_addressed": "string",
+        "reasoning": "string",
+        "example_added": "string"
+      }
+    ],
+    "expected_improvement": "string",
+    "summary": "string"
+  }
 }
+
+If "rubric_score" is 90 or above, set "prompt_patch" to null.
+If "rubric_score" is less than 90, you MUST generate a minimal, surgical patch to the agent's system prompt to address the identified failure moments (especially high/medium severity ones) under the "prompt_patch" property.
+
+Rules for generating the prompt patch:
+1. Address the HIGHEST SEVERITY failure first.
+2. Be SPECIFIC — reference the exact failure pattern with an example from the transcript.
+3. Be MINIMAL — add only what is missing, don't rewrite working sections.
+4. Add CONCRETE EXAMPLES where the failure was a style/tone issue.
+5. Do NOT introduce new constraints that contradict passing behaviors.
+6. Limit to maximum 2 patches.
+7. Set target_section to the header name in the system prompt where the patch should be applied (e.g. "Persona", "Objection Handling Scripts", "Hard Rules"). If it's a new section, specify the section header name.
+8. Set patch_type to "addition" or "modification".
 
 Rubric scoring:
 - greeted_within_5s = 20 points (agent introduced self + NovaTel in first turn)

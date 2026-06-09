@@ -80,9 +80,11 @@ export class AgentPipeline extends EventEmitter {
   private roomName: string;
   private livekitTransport: import('../livekit/LiveKitTransport').LiveKitTransport;
   private clientReadyResolver: (() => void) | null = null;
+  private isClientReady = false;
 
   private handleClientReady = () => {
     logger.info(`[AgentPipeline] client:ready received for call ${this.callId}`);
+    this.isClientReady = true;
     if (this.clientReadyResolver) {
       this.clientReadyResolver();
       this.clientReadyResolver = null;
@@ -248,21 +250,25 @@ export class AgentPipeline extends EventEmitter {
   private triggerBackgroundGreeting(): void {
     setImmediate(async () => {
       try {
-        logger.info('[AgentPipeline] Waiting for client WebRTC connection to stabilize...');
-        const clientReadyPromise = new Promise<void>((resolve) => {
-          this.clientReadyResolver = resolve;
-        });
-        const fallbackTimeout = new Promise<void>((resolve) => {
-          setTimeout(() => {
-            if (this.clientReadyResolver) {
-              logger.warn('[AgentPipeline] client:ready timed out (4s fallback) — greeting starting');
-              this.clientReadyResolver();
-              this.clientReadyResolver = null;
-            }
-            resolve();
-          }, 4000);
-        });
-        await Promise.race([clientReadyPromise, fallbackTimeout]);
+        if (this.isClientReady) {
+          logger.info('[AgentPipeline] Client was already ready — skipping WebRTC stabilize wait');
+        } else {
+          logger.info('[AgentPipeline] Waiting for client WebRTC connection to stabilize...');
+          const clientReadyPromise = new Promise<void>((resolve) => {
+            this.clientReadyResolver = resolve;
+          });
+          const fallbackTimeout = new Promise<void>((resolve) => {
+            setTimeout(() => {
+              if (this.clientReadyResolver) {
+                logger.warn('[AgentPipeline] client:ready timed out (4s fallback) — greeting starting');
+                this.clientReadyResolver();
+                this.clientReadyResolver = null;
+              }
+              resolve();
+            }, 4000);
+          });
+          await Promise.race([clientReadyPromise, fallbackTimeout]);
+        }
         if (this.isShuttingDown) return;
 
         // Additional 500ms delay to ensure browser audio context & track subscription are fully active

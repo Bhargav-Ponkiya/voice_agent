@@ -91,14 +91,12 @@ export async function getCurrentPrompt(): Promise<{ version: number; systemPromp
 export async function generateAndApplyPatch(
   callId: string,
   rubricScore: number,
-  failureMoments: unknown[],
-  turns: TranscriptTurn[]
+  patch: any
 ): Promise<{ version: number; summary: string } | null> {
   if (rubricScore >= 90) {
     logger.info(`Call ${callId} scored ${rubricScore}/100 — no patch needed`);
     return null;
   }
-
 
   // Mutex: skip if another patch is already being generated to prevent version collision
   if (patchInProgress) {
@@ -107,50 +105,16 @@ export async function generateAndApplyPatch(
   }
   patchInProgress = true;
 
-  const current = await getCurrentPrompt();
-  const nextVersion = current.version + 1;
-  const formattedTranscript = buildTranscriptText(turns);
-
-  const metaPrompt = buildSelfHealingPrompt(
-    current.systemPrompt,
-    current.version,
-    nextVersion,
-    callId,
-    rubricScore,
-    failureMoments,
-    formattedTranscript
-  );
-
-  let patch: any = null;
-  let retryCount = 0;
-  const MAX_RETRIES = 2;
-  const RETRY_DELAY_MS = 2500;
-
-  while (retryCount <= MAX_RETRIES) {
-    try {
-      const rawResponse = await analyzeCall(metaPrompt);
-      patch = parseRobustJson(rawResponse);
-      
-      // Verify minimal patch structure to ensure we have the patches array
-      if (!patch || typeof patch !== 'object' || !Array.isArray(patch.patches)) {
-        throw new Error('Self-healing patch response is missing required patches array');
-      }
-      break; // Success!
-    } catch (err: any) {
-      const errStr = err?.message || String(err);
-      if (retryCount < MAX_RETRIES) {
-        retryCount++;
-        logger.warn(`[selfHealingPrompt] Patch generation attempt ${retryCount}/${MAX_RETRIES + 1} failed (Error: ${errStr.slice(0, 100)}). Retrying in ${RETRY_DELAY_MS}ms...`);
-        await new Promise<void>((r) => setTimeout(r, RETRY_DELAY_MS));
-      } else {
-        logger.error(`[selfHealingPrompt] Patch generation failed after ${MAX_RETRIES + 1} attempts for call ${callId}`, err);
-        patchInProgress = false; // release lock before throwing/exiting
-        return null;
-      }
-    }
-  }
-
   try {
+    // Verify minimal patch structure to ensure we have the patches array
+    if (!patch || typeof patch !== 'object' || !Array.isArray(patch.patches)) {
+      logger.warn(`Call ${callId}: prompt patch skipped — invalid patch format or missing patches array`);
+      return null;
+    }
+
+    const current = await getCurrentPrompt();
+    const nextVersion = current.version + 1;
+
     // Apply patches to the current prompt
     let newPrompt = current.systemPrompt;
     for (const p of patch.patches || []) {

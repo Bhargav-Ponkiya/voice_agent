@@ -7,7 +7,7 @@ import path from 'path';
 import fs from 'fs';
 import { config } from './config';
 import { connectDatabase } from './database/connection';
-import { seedInitialPrompt, getCurrentPrompt, generateAndApplyPatch } from './services/promptEvolution/selfHealingPrompt';
+import { seedInitialPrompt, getCurrentPrompt } from './services/promptEvolution/selfHealingPrompt';
 import { AgentPipeline } from './services/agent/agentPipeline';
 import { runCallAnalysis } from './services/analysis/callAnalysis';
 import { Call } from './database/models/Call';
@@ -173,7 +173,7 @@ io.on('connection', (socket) => {
             socket.emit('analysis:started');
           }
 
-          const analysis = await runCallAnalysis(
+          const result = await runCallAnalysis(
             callId,
             turns,
             duration,
@@ -181,18 +181,11 @@ io.on('connection', (socket) => {
             promptVersion
           );
 
-          if (analysis) {
+          if (result) {
+            const { analysis, patch } = result;
             if (socket.connected) {
               socket.emit('analysis:complete', { callId, scorecard: analysis });
             }
-
-            // Self-healing: generate patch if score is below threshold
-            const patch = await generateAndApplyPatch(
-              callId,
-              (analysis as any).rubric_score,
-              (analysis as any).failure_moments || [],
-              turns
-            );
 
             if (patch && socket.connected) {
               socket.emit('prompt:evolved', patch);
