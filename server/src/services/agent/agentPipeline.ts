@@ -414,6 +414,7 @@ export class AgentPipeline extends EventEmitter {
             const verdict = elapsedMs < 1500 ? 'WITHIN BUDGET' : 'OVER BUDGET';
             logger.info(`[Latency] first_audio = ${elapsedMs}ms (target <1500ms) — ${verdict}`);
           }
+          this.turnStartedAtMs = null;
         }
         this.recorder.addAgentAudio(chunk);
         this.livekitTransport.pushAgentAudio(chunk);
@@ -581,6 +582,7 @@ export class AgentPipeline extends EventEmitter {
         clearTimeout(playbackTimeoutId);
         playbackTimeoutId = null;
       }
+      this.turnStartedAtMs = null;
       // CRITICAL: Always reset isSpeaking in finally so it runs even when an exception
       // (e.g., Gemini 503) causes the function to exit early via throw.
       // Previously this only ran at the bottom of the function, leaving the pipeline
@@ -656,12 +658,29 @@ export class AgentPipeline extends EventEmitter {
   private startDeadAirDetection(): void {
     this.deadAirCheckInterval = setInterval(() => {
       const now = performance.now();
-      const silenceDurationMs = now - this.lastSpeakMs;
+      
+      // We only flag dead air if:
+      // 1. We are waiting for the agent to respond to a finalized customer utterance (Gemini/TTS latency)
+      // 2. Or the agent is in the middle of speaking but the audio stream stalled (TTS gap)
+      // We do NOT count silence when waiting for the customer to talk or during initial connection.
+      
+      let isAgentSlow = false;
+      let silenceDurationMs = 0;
+      
+      if (this.turnStartedAtMs !== null && !this.isSpeaking) {
+        // Customer finished speaking, we are waiting for Gemini/TTS response
+        silenceDurationMs = now - this.turnStartedAtMs;
+        isAgentSlow = true;
+      } else if (this.isSpeaking && this.lastAgentAudioMs > 0) {
+        // Agent is speaking, check for gaps between audio chunks
+        silenceDurationMs = now - this.lastAgentAudioMs;
+      }
+
       const DEAD_AIR_THRESHOLD = 3000;
 
       if (silenceDurationMs > DEAD_AIR_THRESHOLD) {
         if (this.potentialDeadAirStart === null) {
-          this.potentialDeadAirStart = this.lastSpeakMs;
+          this.potentialDeadAirStart = isAgentSlow ? this.turnStartedAtMs : this.lastAgentAudioMs;
         }
       } else if (this.potentialDeadAirStart !== null) {
         const deadAirDuration = now - this.potentialDeadAirStart;

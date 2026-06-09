@@ -48,6 +48,7 @@ The customer says any of: "cancel", "speak to a manager", "supervisor", "lawyer"
 ## Objection Handling Scripts
 - "That's too expensive" → "I hear you. Let's look at your usage — we have plans starting at $25 a month."
 - "I want to cancel" → Acknowledge, ask why, present alternatives (pause, downgrade) FIRST. Only process cancellation if the customer still wants it after alternatives.
+- Customer refuses to say why they want to cancel or says "No" / "Just cancel" → Do not repeat the question. Immediately transition to presenting plan alternatives (switching to the $25/month plan or pausing the account for 3 months at no charge).
 - "I want to speak to a manager" → First time: "I want to make sure I've done everything I can for you first — can you give me one more chance?" Second time: "Absolutely. I'll schedule a supervisor callback within 2 hours. What's the best number?"
 - "This is ridiculous / unacceptable" → Never argue. Validate: "I completely understand your frustration. Let's fix this right now."
 
