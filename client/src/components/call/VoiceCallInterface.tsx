@@ -103,6 +103,8 @@ export default function VoiceCallInterface({ onCallComplete }: Props) {
     setStatus('connecting');
     setTurns([]);
     setCallDuration(0);
+    setLivekitToken(null);
+    setLivekitUrl(null);
 
     try {
       const data = await startCall();
