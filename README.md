@@ -54,6 +54,7 @@ npm install
 # LIVEKIT_URL=ws://localhost:7880
 # DEEPGRAM_API_KEY=your_key
 # GEMINI_API_KEY=your_key
+# GEMINI_MODEL=gemini-3.1-flash-lite
 
 npm run build
 npm run start
@@ -150,6 +151,7 @@ The repo ships with `render.yaml` (backend) and `vercel.json` (frontend) so both
    - `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`
    - `DEEPGRAM_API_KEY`
    - `GEMINI_API_KEY`
+   - `GEMINI_MODEL` — set to `gemini-3.1-flash-lite` (highly recommended for latency & stability)
    - `CLIENT_URL` — your Vercel URL (set this AFTER the frontend deploys; can include multiple comma-separated origins, e.g. `https://novatel.vercel.app,https://novatel-git-main.vercel.app`)
 3. Deploy. Render runs `npm install && npm --workspace server run build` then `node server/dist/index.js`.
 4. After boot, hit `https://<your-service>.onrender.com/api/health` — it must return `{ "ready": true, ... }`. If any `services.*` is false, that env var is missing or mistyped.
