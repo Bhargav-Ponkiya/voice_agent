@@ -53,6 +53,9 @@ export class AgentPipeline extends EventEmitter {
   /** Monotonic timestamp of the last agent audio chunk emitted — for diagnostics. */
   private lastAgentAudioMs = 0;
 
+  /** Tracks if we have received the first audio chunk for the current agent response turn. */
+  private receivedAgentAudioThisTurn = false;
+
   /** Anti-self-interruption: count consecutive interims received during the current
    *  agent response. Echo bleed from imperfect browser echo cancellation typically
    *  produces 1 transient interim per leak; real user speech produces several in a row.
@@ -348,6 +351,7 @@ export class AgentPipeline extends EventEmitter {
     isGreeting: boolean
   ): Promise<void> {
     const speakId = ++this.currentSpeakId;
+    this.receivedAgentAudioThisTurn = false;
     logger.info(`[AgentPipeline] streamAgentResponse called. userText: "${userText}", isGreeting: ${isGreeting}, speakId: ${speakId}`);
 
     // Reset anti-self-interruption interim counter — a fresh response gets a fresh ledger.
@@ -407,6 +411,7 @@ export class AgentPipeline extends EventEmitter {
         audioChunksCount++;
         if (audioChunksCount === 1) {
           logger.info(`[AgentPipeline] Deepgram first audio chunk received: ${chunk.length} bytes`);
+          this.receivedAgentAudioThisTurn = true;
           // Latency milestone #2: first audible TTS byte ready to push to LiveKit.
           // This is the user-perceptible "agent starts speaking" moment.
           if (this.turnStartedAtMs !== null && !isGreeting) {
@@ -589,6 +594,7 @@ export class AgentPipeline extends EventEmitter {
       // stuck in isSpeaking=true state after any non-AbortError exception.
       if (this.currentSpeakId === speakId) {
         this.isSpeaking = false;
+        this.receivedAgentAudioThisTurn = false;
         this.lastSpeakMs = performance.now();
       }
       // Clear any partial streaming transcript on the client if this speak is ending
@@ -667,12 +673,12 @@ export class AgentPipeline extends EventEmitter {
       let isAgentSlow = false;
       let silenceDurationMs = 0;
       
-      if (this.turnStartedAtMs !== null && !this.isSpeaking) {
-        // Customer finished speaking, we are waiting for Gemini/TTS response
+      if (this.turnStartedAtMs !== null && !this.receivedAgentAudioThisTurn) {
+        // Customer finished speaking, we are waiting for agent to actually start making sound
         silenceDurationMs = now - this.turnStartedAtMs;
         isAgentSlow = true;
-      } else if (this.isSpeaking && this.lastAgentAudioMs > 0) {
-        // Agent is speaking, check for gaps between audio chunks
+      } else if (this.isSpeaking && this.receivedAgentAudioThisTurn && this.lastAgentAudioMs > 0) {
+        // Agent is currently speaking (audio has started), check for gaps between audio chunks
         silenceDurationMs = now - this.lastAgentAudioMs;
       }
 

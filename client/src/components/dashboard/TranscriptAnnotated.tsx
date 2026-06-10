@@ -8,6 +8,61 @@ interface Props {
   scorecard: Scorecard;
 }
 
+function findMatchingTurnIndex(
+  timestamp: string,
+  speaker: string | undefined,
+  textPreview: string,
+  turns: Turn[]
+): number | null {
+  const cleanTime = (timestamp || '').replace(/[\[\]\s]/g, '');
+  if (!cleanTime) return null;
+
+  let candidates = turns;
+  if (speaker) {
+    candidates = turns.filter(t => t.speaker.toLowerCase() === speaker.toLowerCase());
+  }
+
+  const timeMatches = candidates.filter(t => t.timestamp.replace(/[\[\]\s]/g, '') === cleanTime);
+  
+  if (timeMatches.length === 1) {
+    return timeMatches[0].turnIndex;
+  }
+
+  if (textPreview) {
+    const cleanPreview = textPreview.toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+    const pool = timeMatches.length > 0 ? timeMatches : candidates;
+    
+    let bestMatch: Turn | null = null;
+    let maxOverlap = 0;
+    
+    for (const cand of pool) {
+      const candText = cand.text.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (candText.includes(cleanPreview) || cleanPreview.includes(candText)) {
+        return cand.turnIndex;
+      }
+      
+      const previewWords = textPreview.toLowerCase().split(/\s+/).filter(Boolean);
+      const candWords = cand.text.toLowerCase().split(/\s+/).filter(Boolean);
+      const overlap = previewWords.filter(w => candWords.includes(w)).length;
+      if (overlap > maxOverlap) {
+        maxOverlap = overlap;
+        bestMatch = cand;
+      }
+    }
+    
+    if (bestMatch && maxOverlap > 0) {
+      return bestMatch.turnIndex;
+    }
+  }
+
+  const anyTimeMatch = turns.find(t => t.timestamp.replace(/[\[\]\s]/g, '') === cleanTime);
+  if (anyTimeMatch) {
+    return anyTimeMatch.turnIndex;
+  }
+
+  return null;
+}
+
 export default function TranscriptAnnotated({ turns, scorecard }: Props) {
   const [showAnnotations, setShowAnnotations] = useState(true);
 
@@ -20,10 +75,16 @@ export default function TranscriptAnnotated({ turns, scorecard }: Props) {
   const sentimentByTurn: Record<number, string> = {};
 
   for (const cf of scorecard.call_flow || []) {
-    stageByTurn[cf.turn] = cf.stage;
+    const matchIdx = findMatchingTurnIndex(cf.timestamp, cf.speaker, cf.text_preview, turns);
+    const finalKey = matchIdx !== null ? matchIdx : (cf.turn + 1);
+    stageByTurn[finalKey] = cf.stage;
   }
   for (const sa of scorecard.sentiment_arc || []) {
-    sentimentByTurn[sa.turn] = sa.sentiment;
+    const isGreeting = sa.text_preview && sa.text_preview.toLowerCase().startsWith('hello, thank you');
+    const speaker = isGreeting ? 'Agent' : 'Customer';
+    const matchIdx = findMatchingTurnIndex(sa.timestamp, speaker, sa.text_preview, turns);
+    const finalKey = matchIdx !== null ? matchIdx : (sa.turn + 1);
+    sentimentByTurn[finalKey] = sa.sentiment;
   }
 
   const SENTIMENT_DOT: Record<string, string> = {
@@ -36,8 +97,6 @@ export default function TranscriptAnnotated({ turns, scorecard }: Props) {
     medium: { bg: 'bg-amber-50/80',  border: 'border-amber-200',  text: 'text-amber-800',  iconColor: 'text-amber-600' },
     low:    { bg: 'bg-slate-50',  border: 'border-slate-200',      text: 'text-slate-650',   iconColor: 'text-slate-500' },
   };
-
-  let customerTurnIdx = 0;
 
   return (
     <div className="glass rounded-3xl p-6 space-y-4 fade-up">
@@ -59,9 +118,8 @@ export default function TranscriptAnnotated({ turns, scorecard }: Props) {
         {turns.map((turn, idx) => {
           const isCustomer = turn.speaker === 'Customer';
           const turnFailure = failureByTimestamp[turn.timestamp];
-          const stage = stageByTurn[idx + 1];
-          const sentiment = isCustomer ? sentimentByTurn[customerTurnIdx + 1] : undefined;
-          if (isCustomer) customerTurnIdx++;
+          const stage = stageByTurn[turn.turnIndex];
+          const sentiment = isCustomer ? sentimentByTurn[turn.turnIndex] : undefined;
 
           return (
             <div key={idx} className={clsx('flex flex-col gap-1.5', isCustomer ? 'items-end' : 'items-start')}>

@@ -72,6 +72,17 @@ export async function runCallAnalysis(
       if (!scorecard || typeof scorecard !== 'object' || scorecard.rubric_score === undefined) {
         throw new Error('Call analysis response is missing required rubric_score field');
       }
+
+      // Recalculate rubric score programmatically to fix LLM addition/logical errors
+      let calculatedScore = 0;
+      const details = scorecard.rubric_details || {};
+      if (details.greeted_within_5s) calculatedScore += 20;
+      if (details.issue_acknowledged_before_solution) calculatedScore += 25;
+      if (details.policy_explained_clearly) calculatedScore += 20;
+      if (details.call_closed_with_resolution) calculatedScore += 20;
+      if (details.no_dead_air_over_3s) calculatedScore += 15;
+      scorecard.rubric_score = calculatedScore;
+
       break; // Success!
     } catch (err: any) {
       const errStr = err?.message || String(err);
